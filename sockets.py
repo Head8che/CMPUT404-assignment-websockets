@@ -13,6 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+# References:
+# - https://github.com/uofa-cmput404/cmput404-slides/blob/master/examples/WebSocketsExamples/chat.py
+# - https://github.com/abramhindle/WebSocketsExamples/blob/master/broadcaster.py
+
+
 import flask
 from flask import Flask, request
 from flask_sockets import Sockets
@@ -25,6 +30,26 @@ import os
 app = Flask(__name__)
 sockets = Sockets(app)
 app.debug = True
+
+clients = list()
+
+def send_all(msg):
+    for client in clients:
+        client.put( msg )
+
+def send_all_json(obj):
+    send_all( json.dumps(obj) )
+
+class Client:
+    def __init__(self):
+        self.queue = queue.Queue()
+
+    def put(self, v):
+        self.queue.put_nowait(v)
+
+    def get(self):
+        return self.queue.get()
+
 
 class World:
     def __init__(self):
@@ -58,30 +83,58 @@ class World:
     
     def world(self):
         return self.space
-
-myWorld = World()        
+  
+myWorld = World()     
 
 def set_listener( entity, data ):
     ''' do something with the update ! '''
+    send_all_json({entity:data})
 
 myWorld.add_set_listener( set_listener )
         
 @app.route('/')
 def hello():
     '''Return something coherent here.. perhaps redirect to /static/index.html '''
-    return None
+    return flask.redirect("/static/index.html")
+
 
 def read_ws(ws,client):
     '''A greenlet function that reads from the websocket and updates the world'''
-    # XXX: TODO IMPLEMENT ME
-    return None
+    try:
+        while True:
+            msg = ws.receive()
+            print ("WS RECV: %s" % msg)
+            if (msg is not None):
+                packet = json.loads(msg)
+                for key,value in packet.items():
+                    myWorld.set(key,value)
+            else:
+                break
+    except:
+        '''Done'''
+        print("Error Reading")
+
+
 
 @sockets.route('/subscribe')
 def subscribe_socket(ws):
     '''Fufill the websocket URL of /subscribe, every update notify the
        websocket and read updates from the websocket '''
-    # XXX: TODO IMPLEMENT ME
-    return None
+    subscribedClient = Client()
+    clients.append(subscribedClient)
+    # Two greenlet threads for each client // subscribe_socket & read_ws
+    g = gevent.spawn( read_ws,ws, subscribedClient)
+
+    try:
+        # Obtains the message from the client and send sback the message on the socket
+        while True:
+            msg = subscribedClient.get()
+            ws.send(msg)
+    except Exception as e:
+        print("WS Error %s" % e)
+    finally:
+        clients.remove(subscribedClient)
+        gevent.kill(g)
 
 
 # I give this to you, this is how you get the raw body/data portion of a post in flask
@@ -99,23 +152,34 @@ def flask_post_json():
 @app.route("/entity/<entity>", methods=['POST','PUT'])
 def update(entity):
     '''update the entities via this interface'''
-    return None
+    data = flask_post_json()
+    if request.method == "PUT":
+        myWorld.set(entity,data)
+    else:
+        for key,value in data.items():
+            myWorld.update(entity,key,value)
+    return (json.dumps(data),200)
 
 @app.route("/world", methods=['POST','GET'])    
 def world():
     '''you should probably return the world here'''
-    return None
+    if request.method == 'POST':
+        myWorld.world = flask_post_json()
+
+    if request.method == 'GET':
+        return json.dumps(myWorld.world(),200)
 
 @app.route("/entity/<entity>")    
 def get_entity(entity):
     '''This is the GET version of the entity interface, return a representation of the entity'''
-    return None
+    return json.dumps(myWorld.get(entity))
 
 
 @app.route("/clear", methods=['POST','GET'])
 def clear():
     '''Clear the world out!'''
-    return None
+    myWorld.clear()
+    return json.dumps(myWorld.world(),200)
 
 
 
@@ -125,4 +189,4 @@ if __name__ == "__main__":
         and run
         gunicorn -k flask_sockets.worker sockets:app
     '''
-    app.run()
+    os.system("gunicorn -k flask_sockets.worker sockets:app")
